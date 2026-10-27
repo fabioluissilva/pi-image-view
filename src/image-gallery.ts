@@ -39,12 +39,26 @@ export function supportsKittyUnicodePlaceholders(): boolean {
 	return true;
 }
 
+/** Detects a tmux session: tmux rewrites the pane's TERM, which hides the outer terminal
+ * from capability detection and requires DCS passthrough for Kitty APC sequences. */
+function inTmux(): boolean {
+	return Boolean(process.env.TMUX) || (process.env.TERM?.toLowerCase() || "").startsWith("tmux");
+}
+
+/** True for WezTerm, which supports Kitty graphics but not U=1 Unicode placeholders. */
+function isWezTerm(): boolean {
+	return process.env.TERM_PROGRAM?.toLowerCase() === "wezterm" || Boolean(process.env.WEZTERM_PANE);
+}
+
 export function detectImageProtocol(): ImageProtocol | null {
 	// An explicit opt-out and Herdr must win over leaked outer-terminal hints.
 	if (process.env.TERM_PROGRAM?.toLowerCase() === "herdr" || /^(none|0)$/i.test(process.env.PI_IMAGE_PROTOCOL ?? "")) return null;
 	const caps = getCapabilities();
 	if (caps.images) return caps.images;
 	if (isKittyUnicodeTerminal()) return "kitty";
+	// tmux reports the pane terminal, not the outer one, so getCapabilities() loses Kitty
+	// graphics support. WezTerm keeps its own hints and renders through direct placement.
+	if (inTmux() && isWezTerm()) return "kitty";
 	return null;
 }
 
@@ -92,7 +106,7 @@ const PLACEHOLDER_CHAR = String.fromCodePoint(0x10eeee);
 const diacriticFor = (n: number) => String.fromCodePoint(ROW_COL_DIACRITICS[n] ?? ROW_COL_DIACRITICS[0]!);
 
 function wrapForTmux(sequence: string): string {
-	if (!process.env.TMUX) return sequence;
+	if (!inTmux()) return sequence;
 	return sequence.replace(/\x1b_G([^\x1b]*)\x1b\\/g, (_match, content) => `\x1bPtmux;\x1b\x1b_G${content}\x1b\x1b\\\x1b\\`);
 }
 
@@ -324,7 +338,10 @@ export class ImageGallery implements Component {
 		for (let i = 0; i < ordered.length; i += 1) {
 			const { resource, col } = ordered[i]!;
 			const headerExtraIds = i === 0 && extraIds.length > 0 && resource.id === firstId ? extraIds : undefined;
-			line += `\x1b[${col}G${encodeDirectKitty(resource.image.data, resource.id, resource.columns, resource.rows, headerExtraIds)}`;
+			// The cursor-positioning escape stays outside tmux's DCS wrapper; only the
+			// Kitty APC chunks need passthrough.
+			const encoded = wrapForTmux(encodeDirectKitty(resource.image.data, resource.id, resource.columns, resource.rows, headerExtraIds));
+			line += `\x1b[${col}G${encoded}`;
 		}
 		lines.push(line);
 		for (let row = 1; row < maxRows; row += 1) {

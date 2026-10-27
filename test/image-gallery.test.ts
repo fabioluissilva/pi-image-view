@@ -341,6 +341,68 @@ describe("image gallery format safety", () => {
 		expect(deletedIds(disposeWrites)).toHaveLength(2);
 	});
 
+	it("keeps the tmux WezTerm fallback when getCapabilities reports no image support", () => {
+		capabilities.images = null;
+		process.env.TERM_PROGRAM = "WezTerm";
+		withoutTmux(() => expect(detectImageProtocol()).toBeNull());
+
+		const previousTmux = process.env.TMUX;
+		process.env.TMUX = "test";
+		try {
+			expect(detectImageProtocol()).toBe("kitty");
+			expect(supportsKittyUnicodePlaceholders()).toBe(false);
+
+			const gallery = new ImageGallery(theme);
+			gallery.setImages([png("wez-tmux")]);
+			const lines = gallery.render(80);
+			expect(lines.some((line) => line.includes(String.fromCodePoint(0x10eeee)))).toBe(false);
+			expect(lines[1]).toContain("a=T,f=100");
+			expect(lines.some((line) => line.includes("wez-tmux.png"))).toBe(true);
+		} finally {
+			if (previousTmux === undefined) delete process.env.TMUX;
+			else process.env.TMUX = previousTmux;
+		}
+	});
+
+	it("wraps direct-placement Kitty sequences for tmux passthrough and keeps cursor positioning outside", () => {
+		process.env.TERM_PROGRAM = "WezTerm";
+		process.env.WEZTERM_PANE = "0";
+		const previousTmux = process.env.TMUX;
+		process.env.TMUX = "test";
+		try {
+			const gallery = new ImageGallery(theme);
+			gallery.setImages([png("wez-a"), png("wez-b")]);
+			const lines = gallery.render(80);
+			const imageLine = lines[1]!;
+			expect(imageLine).toContain("\x1b[2G\x1bPtmux;\x1b\x1b_Ga=T,f=100");
+			expect(imageLine).toContain("\x1b[29G\x1bPtmux;\x1b\x1b_Ga=T,f=100");
+			const unwrapped = imageLine.replace(/\x1bPtmux;\x1b\x1b_G[^\x1b]*\x1b\x1b\\\x1b\\/g, "");
+			expect(unwrapped).not.toContain("\x1b_G");
+			expect(unwrapped).toContain("\x1b[2G");
+		} finally {
+			if (previousTmux === undefined) delete process.env.TMUX;
+			else process.env.TMUX = previousTmux;
+		}
+	});
+
+	it("wraps every chunk of a large direct-placement payload for tmux passthrough", () => {
+		process.env.TERM_PROGRAM = "WezTerm";
+		const previousTmux = process.env.TMUX;
+		process.env.TMUX = "test";
+		try {
+			const gallery = new ImageGallery(theme);
+			gallery.setImages([png("wez-large", "x".repeat(4097))]);
+			const imageLine = gallery.render(80)[1]!;
+			const wrappers = [...imageLine.matchAll(/\x1bPtmux;\x1b\x1b_G([^;]*);/g)].map((match) => match[1]);
+			expect(wrappers).toHaveLength(2);
+			expect(wrappers[0]).toContain("m=1");
+			expect(wrappers[1]).toContain("m=0");
+		} finally {
+			if (previousTmux === undefined) delete process.env.TMUX;
+			else process.env.TMUX = previousTmux;
+		}
+	});
+
 	it("detects Orca and cmux for Kitty Unicode placeholders and OSC 8 hyperlinks even when WEZTERM_PANE leaks", () => {
 		capabilities.images = null;
 		capabilities.hyperlinks = false;
